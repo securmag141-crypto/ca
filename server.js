@@ -2,8 +2,15 @@ const express = require('express');
 const WebSocket = require('ws');
 const app = express();
 
-// Статический сервер для раздачи HTML-клиента (создадим позже)
-app.use(express.static('public'));
+// Явно раздаем index.html для корневого пути
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/public/index.html');
+});
+
+// Обработка для любого другого пути (опционально, чтобы избежать ошибок)
+app.get('*', (req, res) => {
+  res.redirect('/');
+});
 
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
