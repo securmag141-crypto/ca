@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Звонилка t1/t2</title>
+    <style>
+        body { font-family: Arial; max-width: 500px; margin: 20px auto; padding: 20px; }
+        #status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+        input, button { padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; }
+        button:disabled { background: #ccc; }
+        #localVideo, #remoteVideo { width: 100%; background: #000; margin-top: 10px; }
+        .video-container { display: flex; flex-direction: column; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <h2>Тестовая звонилка (t1 / t2)</h2>
+
+    <div>
+        <input type="text" id="usernameInput" placeholder="Введите t1 или t2">
+        <button id="registerButton">Зарегистрироваться</button>
+        <div id="status" class="disconnected">Не подключен</div>
+    </div>
+
+    <hr>
+
+    <div id="callSection" class="hidden">
+        <input type="text" id="targetInput" placeholder="Введите t1 или t2 для вызова">
+        <button id="callButton">Позвонить</button>
+        <button id="hangupButton" disabled>Завершить звонок</button>
+
+        <div class="video-container">
+            <video id="localVideo" autoplay muted playsinline></video>
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+    </div>
+
+    <script>
+        const serverUrl = 'wss://ca-vh29.onrender.com';
+        let ws = null;
+        let peerConnection = null;
+        let localStream = null;
+        const usernameInput = document.getElementById('usernameInput');
+        const registerButton = document.getElementById('registerButton');
+        const statusDiv = document.getElementById('status');
+        const callSection = document.getElementById('callSection');
+        const targetInput = document.getElementById('targetInput');
+        const callButton = document.getElementById('callButton');
+        const hangupButton = document.getElementById('hangupButton');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+
+        // 1. Регистрация на сигнальном сервере
+        registerButton.onclick = async () => {
+            const username = usernameInput.value.trim();
+            if (username !== 't1' && username !== 't2') {
+                alert('Только t1 или t2!');
+                return;
+            }
+
+            ws = new WebSocket(serverUrl);
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ type: 'register', username: username }));
+            };
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleSignalingMessage(data);
+            };
+            ws.onclose = () => {
+                statusDiv.className = 'disconnected';
+                statusDiv.textContent = 'Отключен от сервера';
+                callSection.classList.add('hidden');
+            };
+        };
+
+        // 2. Обработка сообщений от сервера
+        function handleSignalingMessage(data) {
+            console.log('Получено с сервера:', data);
+
+            if (data.type === 'register_success') {
+                statusDiv.className = 'connected';
+                statusDiv.textContent = `Зарегистрирован как ${data.username}`;
+                callSection.classList.remove('hidden');
+                initMedia(); // Запросить доступ к микрофону
+            }
+
+            if (data.type === 'offer') {
+                startCall(false);
+                peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                createAndSendAnswer();
+            }
+
+            if (data.type === 'answer') {
+                peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            }
+
+            if (data.type === 'candidate') {
+                peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+        }
+
+        // 3. Запрос доступа к микрофону
+        async function initMedia() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                localVideo.srcObject = localStream;
+            } catch (err) {
+                console.error('Ошибка доступа к микрофону:', err);
+                alert('Не удалось получить доступ к микрофону');
+            }
+        }
+
+        // 4. Инициировать или принять звонок
+        function startCall(isCaller) {
+            const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+            peerConnection = new RTCPeerConnection(config);
+
+            // Отправка ICE-кандидатов
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'candidate',
+                        candidate: event.candidate,
+                        target: targetInput.value.trim()
+                    }));
+                }
+            };
+
+            // Получение удалённого потока
+            peerConnection.ontrack = (event) => {
+                remoteVideo.srcObject = event.streams[0];
+            };
+
+            // Добавление локального потока
+            if (localStream) {
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            }
+
+            if (isCaller) {
+                // Создание предложения (offer)
+                peerConnection.createOffer()
+                    .then(offer => peerConnection.setLocalDescription(offer))
+                    .then(() => {
+                        ws.send(JSON.stringify({
+                            type: 'offer',
+                            offer: peerConnection.localDescription,
+                            target: targetInput.value.trim()
+                        }));
+                    });
+            }
+
+            hangupButton.disabled = false;
+        }
+
+        // 5. Создание ответа (answer) на входящий вызов
+        function createAndSendAnswer() {
+            peerConnection.createAnswer()
+                .then(answer => peerConnection.setLocalDescription(answer))
+                .then(() => {
+                    ws.send(JSON.stringify({
+                        type: 'answer',
+                        answer: peerConnection.localDescription,
+                        target: targetInput.value.trim()
+                    }));
+                });
+        }
+
+        // 6. Инициация вызова
+        callButton.onclick = () => {
+            const target = targetInput.value.trim();
+            if (target !== 't1' && target !== 't2') {
+                alert('Можно звонить только на t1 или t2!');
+                return;
+            }
+            startCall(true);
+            callButton.disabled = true;
+        };
+
+        // 7. Завершение звонка
+        hangupButton.onclick = () => {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            remoteVideo.srcObject = null;
+            hangupButton.disabled = true;
+            callButton.disabled = false;
+        };
+    </script>
+</body>
+</html>
